@@ -21,11 +21,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install PyInstaller
-        run: pip install pyinstaller
+      - name: Install dependencies
+        run: pip install pyinstaller ttkbootstrap pillow pystray
 
       - name: Build EXE
-        run: pyinstaller --onefile --windowed --name SleepTimerPro sleep_timer.py
+        run: pyinstaller --onefile --windowed --name SleepTimerPro Sleep-timer-windows.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
