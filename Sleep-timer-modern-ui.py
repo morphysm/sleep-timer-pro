@@ -210,11 +210,11 @@ class ProfessionalSleepTimer:
 
     def countdown_loop(self):
         gen = self._generation
-        while self.running:
+        while self.running and gen == self._generation:
             remaining = self.target_time - time.time()
 
             if remaining <= 0:
-                if self.running:
+                if self.running and gen == self._generation:
                     self.root.after(0, self.execute_action)
                 break
 
@@ -273,6 +273,7 @@ class ProfessionalSleepTimer:
 
     def cancel_timer(self):
         self.running = False
+        self._generation += 1
         if self._reset_callback_id is not None:
             self.root.after_cancel(self._reset_callback_id)
             self._reset_callback_id = None

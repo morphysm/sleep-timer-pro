@@ -41,6 +41,7 @@ class SleepTimerApp:
         self.running       = False
         self.target_time   = None
         self.warning_shown = False
+        self._generation   = 0
 
         cfg = load_config()
         self.minutes_var = tk.IntVar(value=cfg.get("minutes", 45))
@@ -133,6 +134,7 @@ class SleepTimerApp:
         self.running       = True
         self.warning_shown = False
         self.target_time   = time.time() + minutes * 60
+        self._generation  += 1
 
         self.start_btn.config(state=tk.DISABLED)
         self.cancel_btn.config(state=tk.NORMAL)
@@ -141,18 +143,20 @@ class SleepTimerApp:
         threading.Thread(target=self._countdown_loop, daemon=True).start()
 
     def _countdown_loop(self):
-        while self.running:
+        gen = self._generation
+        while self.running and gen == self._generation:
             remaining = self.target_time - time.time()
 
             if remaining <= 0:
-                if self.running:
+                if self.running and gen == self._generation:
                     self.root.after(0, self._execute_action)
                 break
 
             mins = int(remaining // 60)
             secs = int(remaining % 60)
             text = f"{self.action_var.get().capitalize()} in {mins:02d}:{secs:02d}"
-            self.root.after(0, lambda t=text: self.status_var.set(t))
+            self.root.after(0, lambda t=text, g=gen:
+                            self.status_var.set(t) if g == self._generation else None)
 
             if not self.warning_shown and remaining <= 60:
                 self.warning_shown = True
@@ -190,6 +194,8 @@ class SleepTimerApp:
         dlg.geometry(f"300x140+{x}+{y}")
 
     def _execute_action(self):
+        if not self.running:
+            return
         self.running = False  # race-condition guard — must be first
         action = self.action_var.get()
         try:
@@ -204,6 +210,7 @@ class SleepTimerApp:
 
     def _cancel(self):
         self.running = False
+        self._generation += 1
         self._reset_ui()
         self.status_var.set("Cancelled")
         self.root.after(2000, lambda: self.status_var.set("Ready")
