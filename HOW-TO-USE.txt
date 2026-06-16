@@ -1,0 +1,31 @@
+SLEEP TIMER PRO
+===============
+
+1. Open this zip file (you're already here!)
+
+2. Drag "SleepTimerPro.exe" to your Desktop
+
+3. Double-click it to run
+
+---------------------------------
+If Windows shows a warning saying
+"Windows protected your PC":
+
+  → Click "More info"
+  → Click "Run anyway"
+
+This is normal for small apps that
+aren't from a big company store.
+---------------------------------
+
+HOW TO USE THE APP:
+- Set the number of minutes
+- Choose Sleep (recommended) or Shutdown
+- Press Start Timer
+- Use "To Tray" to hide it while you
+  listen to music or podcasts
+
+The app will put your PC to sleep
+when the timer runs out.
+
+Enjoy!
