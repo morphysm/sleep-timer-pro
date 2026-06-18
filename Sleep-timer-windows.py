@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
 """
-Sleep Timer Pro — Windows 11 Edition
+Sleep Timer Pro — Windows 11 Edition (Refactored)
 Teal accent, circular arc progress, system tray support
 """
 
 import tkinter as tk
-import subprocess, threading, time, ctypes
+import subprocess
+import time
+import ctypes
+import threading
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 from ttkbootstrap.dialogs import Messagebox
 from PIL import Image, ImageDraw
-import pystray
+
+try:
+    import pystray
+    HAS_PYSTRAY = True
+except ImportError:
+    HAS_PYSTRAY = False
 
 TEAL       = "#00BCD4"
 TEAL_DARK  = "#00838F"
@@ -19,24 +27,37 @@ RING_TRACK = "#1E3035"
 TEXT_DIM   = "#78909C"
 
 
+# ---------------------------------------------------------------------------
+# Windows power API — properly typed via ctypes
+# ---------------------------------------------------------------------------
+try:
+    _powrprof = ctypes.windll.PowrProf
+    _powrprof.SetSuspendState.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    _powrprof.SetSuspendState.restype  = ctypes.c_int
+except Exception:
+    _powrprof = None
+
+
 def _windows_sleep():
-    """Put Windows 11 to sleep (S3/Modern Standby)."""
-    try:
-        # Primary: Windows Power API via ctypes
-        ctypes.windll.PowrProf.SetSuspendState(0, 1, 0)
-    except Exception:
-        # Fallback: rundll32
-        subprocess.run(
-            "rundll32.exe powrprof.dll,SetSuspendState 0,1,0",
-            shell=True
-        )
+    """Put Windows 11 to sleep (S3 / Modern Standby)."""
+    if _powrprof:
+        try:
+            _powrprof.SetSuspendState(0, 1, 0)
+            return
+        except Exception:
+            pass
+    subprocess.run(
+        "rundll32.exe powrprof.dll,SetSuspendState 0,1,0",
+        shell=True, check=False
+    )
 
 
 def _windows_shutdown():
     """Shutdown Windows 11 immediately."""
-    subprocess.run(["shutdown", "/s", "/t", "0"])
+    subprocess.run(["shutdown", "/s", "/t", "0"], check=False)
 
 
+# ---------------------------------------------------------------------------
 class ProfessionalSleepTimer:
     def __init__(self, root):
         self.root = root
@@ -44,23 +65,26 @@ class ProfessionalSleepTimer:
         self.root.geometry("460x620")
         self.root.resizable(False, False)
 
-        self.target_time = None
-        self.running = False
+        # --- timer state ---
+        self.target_time   = None
+        self.running       = False
         self.warning_shown = False
-        self._reset_callback_id = None
         self._total_seconds = 0
+        self._tick_id      = None
+        self._reset_id     = None
 
-        self.tray_icon = None
-        self._tray_thread = None
-        self._generation = 0
+        # --- tray ---
+        self.tray_icon     = None
+        self._tray_image   = self._build_tray_image() if HAS_PYSTRAY else None
 
+        # --- styling ---
         self.root.style.theme_use("darkly")
         self._bg = str(self.root.style.colors.bg)
 
         self.setup_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    # ------------------------------------------------------------------ UI --
+    # ------------------------------------------------------------------ UI
 
     def setup_ui(self):
         main = tb.Frame(self.root, padding=(24, 18, 24, 0))
@@ -104,7 +128,7 @@ class ProfessionalSleepTimer:
         preset_row = tb.Frame(main)
         preset_row.pack(fill=X, pady=(0, 14))
 
-        for m in [15, 30, 45, 60, 90, 120]:
+        for m in (15, 30, 45, 60, 90, 120):
             tb.Button(preset_row, text=f"{m}m",
                       command=lambda v=m: self.set_preset(v),
                       bootstyle="outline-secondary",
@@ -119,8 +143,8 @@ class ProfessionalSleepTimer:
 
         self.action_var = tk.StringVar(value="sleep")
 
-        for val, label in [("sleep",    "💤  Sleep  —  preserves session"),
-                            ("shutdown", "🔌  Shutdown  —  full power off")]:
+        for val, label in (("sleep",    "💤  Sleep  —  preserves session"),
+                           ("shutdown", "🔌  Shutdown  —  full power off")):
             tk.Radiobutton(card_inner, text=label,
                            variable=self.action_var, value=val,
                            bg="#1A2328", fg="white",
@@ -148,7 +172,8 @@ class ProfessionalSleepTimer:
 
         self.tray_btn = tb.Button(btn_row, text="⬇  To Tray",
                                   command=self.minimize_to_tray,
-                                  bootstyle="outline-secondary")
+                                  bootstyle="outline-secondary",
+                                  state=NORMAL if HAS_PYSTRAY else DISABLED)
         self.tray_btn.pack(side=LEFT, expand=YES, fill=X)
 
         # Status bar
@@ -166,25 +191,27 @@ class ProfessionalSleepTimer:
         self.canvas.pack()
 
         # Track ring
-        self.canvas.create_oval(PAD, PAD, SIZE-PAD, SIZE-PAD,
+        self.canvas.create_oval(PAD, PAD, SIZE - PAD, SIZE - PAD,
                                 outline=RING_TRACK, width=14, fill="")
 
-        # Progress arc — starts empty
-        self._arc = self.canvas.create_arc(PAD, PAD, SIZE-PAD, SIZE-PAD,
-                                           start=90, extent=0,
-                                           outline=TEAL, width=14,
-                                           style=tk.ARC)
+        # Progress arc
+        self._arc = self.canvas.create_arc(
+            PAD, PAD, SIZE - PAD, SIZE - PAD,
+            start=90, extent=0,
+            outline=TEAL, width=14,
+            style=tk.ARC
+        )
 
         cx, cy = SIZE // 2, SIZE // 2
 
-        self._time_txt = self.canvas.create_text(cx, cy - 14,
-                                                  text="00:00",
-                                                  font=("Segoe UI", 40, "bold"),
-                                                  fill="white")
-        self._sub_txt = self.canvas.create_text(cx, cy + 22,
-                                                 text="No timer active",
-                                                 font=("Segoe UI", 10),
-                                                 fill=TEXT_DIM)
+        self._time_txt = self.canvas.create_text(
+            cx, cy - 14, text="00:00",
+            font=("Segoe UI", 40, "bold"), fill="white"
+        )
+        self._sub_txt = self.canvas.create_text(
+            cx, cy + 22, text="No timer active",
+            font=("Segoe UI", 10), fill=TEXT_DIM
+        )
 
     def _set_arc(self, fraction, warn=False):
         extent = -(fraction * 359.9)
@@ -192,7 +219,7 @@ class ProfessionalSleepTimer:
                                extent=extent,
                                outline=WARN if warn else TEAL)
 
-    # --------------------------------------------------------- Timer logic --
+    # --------------------------------------------------------- Timer logic
 
     def set_preset(self, minutes):
         self.minutes_var.set(minutes)
@@ -202,68 +229,79 @@ class ProfessionalSleepTimer:
         try:
             minutes = self.minutes_var.get()
         except tk.TclError:
-            Messagebox.show_error("Please enter a valid whole number of minutes.", "Invalid Input")
+            Messagebox.show_error(
+                "Please enter a valid whole number of minutes.", "Invalid Input"
+            )
             return
 
         if minutes < 1:
-            Messagebox.show_error("Minimum duration is 1 minute.", "Invalid Input")
+            Messagebox.show_error(
+                "Minimum duration is 1 minute.", "Invalid Input"
+            )
             return
 
         self._total_seconds = minutes * 60
-        self.target_time = time.time() + self._total_seconds
-        self.running = True
-        self.warning_shown = False
-        self._generation += 1
+        self.target_time    = time.time() + self._total_seconds
+        self.running        = True
+        self.warning_shown  = False
 
         self.start_btn.config(state=DISABLED)
         self.cancel_btn.config(state=NORMAL)
         self.time_spin.config(state=DISABLED)
 
         self._set_arc(1.0)
+        self.status_var.set(
+            f"Running — will {self.action_var.get()} in {minutes} min"
+        )
 
-        threading.Thread(target=self.countdown_loop, daemon=True).start()
-        self.status_var.set(f"Running — will {self.action_var.get()} in {minutes} min")
+        self._tick()
 
-    def countdown_loop(self):
-        gen = self._generation
-        while self.running and gen == self._generation:
-            remaining = self.target_time - time.time()
+    def _tick(self):
+        if not self.running:
+            return
 
-            if remaining <= 0:
-                if self.running and gen == self._generation:
-                    self.root.after(0, self.execute_action)
-                break
+        remaining = self.target_time - time.time()
 
-            mins     = int(remaining // 60)
-            secs     = int(remaining % 60)
-            time_str = f"{mins:02d}:{secs:02d}"
-            fraction = remaining / self._total_seconds
-            warn     = remaining <= 60
+        if remaining <= 0:
+            self.execute_action()
+            return
 
-            self.root.after(0, lambda ts=time_str, f=fraction, w=warn, g=gen:
-                            self.update_display(ts, f, w) if g == self._generation else None)
+        mins     = int(remaining // 60)
+        secs     = int(remaining % 60)
+        time_str = f"{mins:02d}:{secs:02d}"
+        fraction = max(0.0, min(1.0, remaining / self._total_seconds))
+        warn     = remaining <= 60
 
-            if not self.warning_shown and remaining <= 60:
-                self.warning_shown = True
-                self.root.after(0, self.show_warning)
+        self._update_display(time_str, fraction, warn)
 
-            time.sleep(0.5)
+        if not self.warning_shown and remaining <= 60:
+            self.warning_shown = True
+            self._show_warning()
 
-    def update_display(self, time_str, fraction, warn=False):
-        self.canvas.itemconfig(self._time_txt,
-                               text=time_str,
-                               fill=WARN if warn else "white")
+        self._tick_id = self.root.after(1000, self._tick)
 
-        sub = f"⚠  {self.action_var.get().upper()} IMMINENT" if warn \
-              else f"will {self.action_var.get()} in {time_str}"
-        self.canvas.itemconfig(self._sub_txt,
-                               text=sub,
-                               fill=WARN if warn else TEXT_DIM)
+    def _update_display(self, time_str, fraction, warn=False):
+        self.canvas.itemconfig(
+            self._time_txt,
+            text=time_str,
+            fill=WARN if warn else "white"
+        )
+
+        if warn:
+            sub = f"⚠  {self.action_var.get().upper()} IMMINENT"
+        else:
+            sub = f"will {self.action_var.get()} in {time_str}"
+
+        self.canvas.itemconfig(
+            self._sub_txt,
+            text=sub,
+            fill=WARN if warn else TEXT_DIM
+        )
 
         self._set_arc(fraction, warn)
         self._update_tray_tooltip(time_str)
 
-    def show_warning(self):
+    def _show_warning(self):
         action = self.action_var.get()
         result = Messagebox.show_question(
             f"The system will {action} in 60 seconds!\n\nCancel the timer?",
@@ -277,6 +315,8 @@ class ProfessionalSleepTimer:
         if not self.running:
             return
         self.running = False
+        self._cancel_pending_afters()
+
         action = self.action_var.get()
         try:
             if action == "sleep":
@@ -284,27 +324,27 @@ class ProfessionalSleepTimer:
             else:
                 _windows_shutdown()
         except Exception as e:
-            Messagebox.show_error(f"Failed to {action}: {str(e)}", "Error")
+            Messagebox.show_error(f"Failed to {action}: {e}", "Error")
+
         self.reset_ui()
 
     def cancel_timer(self):
         self.running = False
-        self._generation += 1
-        if self._reset_callback_id is not None:
-            self.root.after_cancel(self._reset_callback_id)
-            self._reset_callback_id = None
-
+        self._cancel_pending_afters()
         self.reset_ui()
+
         self.status_var.set("Timer cancelled")
         self.canvas.itemconfig(self._sub_txt, text="Timer cancelled", fill=WARN)
-        self._reset_callback_id = self.root.after(2000, self._deferred_reset_display)
+
+        self._reset_id = self.root.after(2000, self._deferred_reset_display)
         self._update_tray_tooltip()
 
     def _deferred_reset_display(self):
-        self._reset_callback_id = None
+        self._reset_id = None
         if not self.running:
-            self.canvas.itemconfig(self._sub_txt,
-                                   text="No timer active", fill=TEXT_DIM)
+            self.canvas.itemconfig(
+                self._sub_txt, text="No timer active", fill=TEXT_DIM
+            )
 
     def reset_ui(self):
         self.start_btn.config(state=NORMAL)
@@ -313,13 +353,22 @@ class ProfessionalSleepTimer:
         self.canvas.itemconfig(self._time_txt, text="00:00", fill="white")
         self._set_arc(0)
 
-    # --------------------------------------------------------- Tray icon --
+    def _cancel_pending_afters(self):
+        if self._tick_id is not None:
+            self.root.after_cancel(self._tick_id)
+            self._tick_id = None
+        if self._reset_id is not None:
+            self.root.after_cancel(self._reset_id)
+            self._reset_id = None
 
-    def _build_tray_image(self):
+    # --------------------------------------------------------- Tray icon
+
+    @staticmethod
+    def _build_tray_image():
         size = 64
         img  = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        draw.ellipse([4, 4, size-4, size-4],
+        draw.ellipse([4, 4, size - 4, size - 4],
                      fill=(0, 188, 212), outline=(255, 255, 255), width=2)
         cx, cy = size // 2, size // 2
         draw.line([cx, cy, cx - 10, cy - 14], fill="white", width=3)
@@ -327,19 +376,23 @@ class ProfessionalSleepTimer:
         return img
 
     def minimize_to_tray(self):
-        if self.tray_icon is not None:
+        if self.tray_icon is not None or not HAS_PYSTRAY:
             return
-        image = self._build_tray_image()
-        menu  = pystray.Menu(
-            pystray.MenuItem("Show",         self._restore_from_tray, default=True),
+
+        menu = pystray.Menu(
+            pystray.MenuItem("Show", self._restore_from_tray, default=True),
             pystray.MenuItem("Cancel Timer", self._tray_cancel),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit",         self._tray_quit),
+            pystray.MenuItem("Quit", self._tray_quit),
         )
-        self.tray_icon = pystray.Icon("sleep_timer", image, "Sleep Timer Pro", menu)
+        self.tray_icon = pystray.Icon(
+            "sleep_timer", self._tray_image,
+            "Sleep Timer Pro", menu
+        )
         self.root.withdraw()
-        self._tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
-        self._tray_thread.start()
+
+        # Thread encapsulation ensures OS event loops do not deadlock
+        threading.Thread(target=self.tray_icon.run, daemon=True).start()
 
     def _restore_from_tray(self, icon=None, item=None):
         if self.tray_icon:
@@ -364,13 +417,11 @@ class ProfessionalSleepTimer:
         else:
             self.tray_icon.title = "Sleep Timer — idle"
 
-    # --------------------------------------------------------------- Close --
+    # --------------------------------------------------------------- Close
 
     def _quit_app(self):
         self.running = False
-        if self._reset_callback_id is not None:
-            self.root.after_cancel(self._reset_callback_id)
-            self._reset_callback_id = None
+        self._cancel_pending_afters()
         if self.tray_icon:
             self.tray_icon.stop()
             self.tray_icon = None
@@ -387,9 +438,7 @@ class ProfessionalSleepTimer:
                 self.minimize_to_tray()
             elif result == "Cancel & Close":
                 self.running = False
-                if self._reset_callback_id is not None:
-                    self.root.after_cancel(self._reset_callback_id)
-                    self._reset_callback_id = None
+                self._cancel_pending_afters()
                 self.root.destroy()
         else:
             self._quit_app()
